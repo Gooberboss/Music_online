@@ -490,6 +490,11 @@ function joinRoom() {
     });
 
     peer.on('connection', (dataConn) => {
+      // Only accept first connection, ignore duplicates
+      if (conn && conn.open) {
+        addSystemMessage('(Ignoring duplicate data connection)');
+        return;
+      }
       addSystemMessage('✓ Student connected (data channel)');
       conn = dataConn;
       setupDataConnection(conn);
@@ -507,6 +512,10 @@ function joinRoom() {
     });
 
     peer.on('call', (incomingCall) => {
+      if (call) {
+        addSystemMessage('(Ignoring duplicate call)');
+        return;
+      }
       addSystemMessage('✓ Incoming call — answering with local stream...');
       incomingCall.answer(localStream);
       call = incomingCall;
@@ -624,10 +633,30 @@ function setupCallStream(mediaCall, label) {
     addSystemMessage('✓ Receiving ' + label + ' stream! Tracks: ' + remoteStream.getTracks().map(t => t.kind).join(', '));
     const remoteVideo = document.getElementById('remoteVideo');
     remoteVideo.srcObject = remoteStream;
-    // Safari needs this
-    remoteVideo.play().catch(e => addSystemMessage('⚠️ Video play error: ' + e.message));
-    document.getElementById('remoteLabel').textContent = label;
-    updateStatus('connected', '● In Session');
+    
+    // Safari autoplay fix: try to play, if blocked show a tap-to-play overlay
+    const playPromise = remoteVideo.play();
+    if (playPromise !== undefined) {
+      playPromise.then(() => {
+        document.getElementById('remoteLabel').textContent = label;
+        updateStatus('connected', '● In Session');
+      }).catch(() => {
+        // Autoplay blocked — show tap prompt
+        addSystemMessage('⚠️ Tap the video to start playback (Safari requires user interaction)');
+        const overlay = document.createElement('div');
+        overlay.id = 'playOverlay';
+        overlay.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:10;border-radius:12px;';
+        overlay.innerHTML = '<div style="text-align:center;color:#fff;"><div style="font-size:48px;">▶️</div><div style="font-size:14px;margin-top:8px;">Tap to start video</div></div>';
+        overlay.onclick = () => {
+          remoteVideo.play();
+          overlay.remove();
+          document.getElementById('remoteLabel').textContent = label;
+          updateStatus('connected', '● In Session');
+        };
+        document.getElementById('remoteContainer').style.position = 'relative';
+        document.getElementById('remoteContainer').appendChild(overlay);
+      });
+    }
   });
 
   mediaCall.on('close', () => {
@@ -635,10 +664,13 @@ function setupCallStream(mediaCall, label) {
     document.getElementById('remoteLabel').textContent = 'Disconnected';
     updateStatus('disconnected', '● Disconnected');
     addSystemMessage(label + ' disconnected.');
+    // Reset call so teacher can accept new calls
+    call = null;
   });
 
   mediaCall.on('error', (err) => {
     addSystemMessage('⚠️ Call error: ' + err);
+    call = null;
   });
 }
 
