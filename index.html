@@ -498,12 +498,11 @@ function joinRoom() {
       conn = dataConn;
       setupDataConnection(conn);
 
-      // Wait for data channel to be fully ready, then send confirmation and call
-      dataConn.on('open', () => {
+      function startCall() {
         // Tell student we're ready
-        dataConn.send({ type: 'session-ready' });
+        try { dataConn.send({ type: 'session-ready' }); } catch(e) {}
         
-        // Wait then call
+        // Call the student
         setTimeout(() => {
           if (!call) {
             addSystemMessage('Calling student...');
@@ -512,8 +511,15 @@ function joinRoom() {
               setupCallStream(call, 'Student');
             }
           }
-        }, 2000);
-      });
+        }, 1500);
+      }
+
+      // Check if already open (PeerJS sometimes opens before the event fires)
+      if (dataConn.open) {
+        startCall();
+      } else {
+        dataConn.on('open', startCall);
+      }
     });
 
     peer.on('call', (incomingCall) => {
