@@ -4,6 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MusicLesson Live</title>
+<!-- Firebase SDK -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+<script>
+// ═══ FIREBASE CONFIG — Replace with your own from Firebase Console ═══
+firebase.initializeApp({
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT"
+});
+const db = firebase.database();
+</script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; }
@@ -101,6 +114,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   display: none; align-items: center; justify-content: center;
 }
 .chat-toggle .badge.visible { display: flex; }
+
+/* Active rooms list */
+.room-item { display: flex; align-items: center; justify-content: space-between; background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 10px 14px; margin-bottom: 6px; cursor: pointer; transition: border-color 0.2s; }
+.room-item:hover { border-color: #6c63ff; }
+.room-item .room-name { font-size: 14px; color: #eee; }
+.room-item .room-meta { font-size: 11px; color: #888; }
+.room-item .live-dot { width: 8px; height: 8px; background: #4caf50; border-radius: 50%; animation: pulse-dot 2s infinite; }
+@keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>
 </head>
 <body>
@@ -122,6 +143,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     <button class="join-btn" onclick="joinRoom()" id="joinBtn">Start Lesson</button>
   </div>
   <div class="room-id-display" id="roomIdDisplay"></div>
+  <div id="activeRooms" style="width:400px; margin-top:8px;">
+    <p style="font-size:13px; color:#888; margin-bottom:8px;">Active Lessons:</p>
+    <div id="roomList" style="max-height:150px; overflow-y:auto;"></div>
+  </div>
 </div>
 
 <!-- Main App (hidden until joined) -->
@@ -195,6 +220,57 @@ let originalVideoTrack = null;
 const STANDARD_AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 48000 };
 const MUSIC_AUDIO = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 };
 
+// ─── Firebase Room Management ────────────────────────────────────────────────
+function registerRoom(roomId, teacherName) {
+  if (!db) return;
+  db.ref('rooms/' + roomId).set({
+    teacher: teacherName,
+    createdAt: Date.now(),
+    active: true
+  });
+  // Remove room when teacher disconnects
+  db.ref('rooms/' + roomId).onDisconnect().remove();
+}
+
+function removeRoom(roomId) {
+  if (!db) return;
+  db.ref('rooms/' + roomId).remove();
+}
+
+function loadActiveRooms() {
+  if (!db) {
+    document.getElementById('roomList').innerHTML = '<p style="color:#555; font-size:12px;">Firebase not configured</p>';
+    return;
+  }
+  db.ref('rooms').on('value', (snapshot) => {
+    const rooms = snapshot.val();
+    const container = document.getElementById('roomList');
+    if (!rooms || Object.keys(rooms).length === 0) {
+      container.innerHTML = '<p style="color:#555; font-size:12px; font-style:italic;">No active lessons right now</p>';
+      return;
+    }
+    container.innerHTML = '';
+    Object.entries(rooms).forEach(([id, room]) => {
+      const div = document.createElement('div');
+      div.className = 'room-item';
+      div.innerHTML = `
+        <div>
+          <div class="room-name">${escapeHtml(room.teacher)}'s Lesson</div>
+          <div class="room-meta">Room: ${id}</div>
+        </div>
+        <div class="live-dot"></div>
+      `;
+      div.onclick = () => {
+        document.getElementById('roomInput').value = id;
+        document.getElementById('roomInput').readOnly = true;
+        document.getElementById('roomInput').style.opacity = '0.6';
+        document.getElementById('joinBtn').textContent = 'Join Lesson';
+      };
+      container.appendChild(div);
+    });
+  });
+}
+
 // ─── Init ────────────────────────────────────────────────────────────────────
 window.onload = async () => {
   try {
@@ -219,6 +295,9 @@ window.onload = async () => {
   } else {
     document.getElementById('preJoinSubtitle').textContent = 'Start a lesson and share the link with your student.';
   }
+
+  // Load active rooms from Firebase
+  loadActiveRooms();
 
   // Stop camera/mic when user minimizes or switches tabs (pre-join only)
   document.addEventListener('visibilitychange', async () => {
@@ -406,6 +485,8 @@ function joinRoom() {
     peer.on('open', (id) => {
       addSystemMessage('✓ Registered as host: ' + id);
       updateStatus('connected', '● Waiting for student...');
+      // Register room in Firebase so students can see it
+      registerRoom(roomId, displayName);
     });
 
     peer.on('connection', (dataConn) => {
@@ -763,6 +844,8 @@ function endCall() {
     if (isRecording) stopRecording();
     if (call) call.close();
     if (conn) conn.close();
+    // Remove room from Firebase
+    if (isTeacher && roomId) removeRoom(roomId);
     if (peer) peer.destroy();
     localStream.getTracks().forEach(t => t.stop());
     document.getElementById('mainApp').style.display = 'none';
