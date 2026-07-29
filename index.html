@@ -498,16 +498,22 @@ function joinRoom() {
       conn = dataConn;
       setupDataConnection(conn);
 
-      // Teacher initiates the call TO the student (single direction only)
-      setTimeout(() => {
-        if (!call) {
-          addSystemMessage('Calling student...');
-          call = peer.call(dataConn.peer, localStream);
-          if (call) {
-            setupCallStream(call, 'Student');
+      // Wait for data channel to be fully ready, then send confirmation and call
+      dataConn.on('open', () => {
+        // Tell student we're ready
+        dataConn.send({ type: 'session-ready' });
+        
+        // Wait then call
+        setTimeout(() => {
+          if (!call) {
+            addSystemMessage('Calling student...');
+            call = peer.call(dataConn.peer, localStream);
+            if (call) {
+              setupCallStream(call, 'Student');
+            }
           }
-        }
-      }, 1500);
+        }, 2000);
+      });
     });
 
     peer.on('call', (incomingCall) => {
@@ -573,7 +579,7 @@ function startConnectionAttempts(hostId) {
   let connected = false;
 
   function tryConnect() {
-    if (!peer || peer.destroyed || connected) return;
+    if (!peer || peer.destroyed || connected || sessionEstablished) return;
     attempt++;
 
     if (attempt > maxAttempts) {
@@ -590,6 +596,7 @@ function startConnectionAttempts(hostId) {
     dataConn.on('open', () => {
       if (connected) return;
       connected = true;
+      sessionEstablished = true;
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
 
       conn = dataConn;
@@ -688,6 +695,9 @@ function setupDataConnection(dataConn) {
       addSystemMessage(`${data.name} ${data.enabled ? 'enabled' : 'disabled'} Music Mode`);
     } else if (data.type === 'recording') {
       addSystemMessage(`${data.name} ${data.active ? 'started' : 'stopped'} recording`);
+    } else if (data.type === 'session-ready') {
+      // Teacher confirmed connection — stop all retries
+      addSystemMessage('✓ Teacher confirmed connection');
     }
   });
 }
