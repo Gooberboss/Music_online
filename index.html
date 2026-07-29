@@ -365,129 +365,169 @@ function joinRoom() {
   // Show main app
   document.getElementById('preJoin').style.display = 'none';
   document.getElementById('mainApp').style.display = '';
-  document.getElementById('roomInfo').textContent = `Room: ${roomId} | Share: ${shareUrl}`;
+  document.getElementById('roomInfo').textContent = `Room: ${roomId}`;
   document.getElementById('localLabel').textContent = displayName + ' (You)';
   document.getElementById('localVideo').srcObject = localStream;
 
-  // Connect PeerJS - use deterministic IDs based on room
-  // First person becomes host, second person connects to host
+  // ICE servers config — use Google STUN (reliable and free)
+  const iceConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' }
+    ]
+  };
+
   const hostId = 'ml-' + roomId + '-host';
-  const isJoining = document.getElementById('roomInput').readOnly; // student has pre-filled room
+  const isJoining = document.getElementById('roomInput').readOnly;
+
+  addSystemMessage('Connecting to signaling server...');
 
   if (isJoining) {
-    // Student: connect directly to the host
-    const myId = 'ml-' + roomId + '-' + Math.random().toString(36).substring(2, 6);
-    peer = new Peer(myId, {
-      debug: 0,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
-        ]
-      }
+    // ─── Student: connect to host ─────────────────────────────────────────
+    const myId = 'ml-' + roomId + '-' + Date.now().toString(36);
+    peer = new Peer(myId, { debug: 1, config: iceConfig });
+
+    peer.on('open', (id) => {
+      addSystemMessage('Connected to server. Looking for teacher...');
+      updateStatus('connected', '● Looking for teacher...');
+      attemptConnect(hostId, 0);
     });
-    peer.on('open', () => {
-      updateStatus('connected', '● Connecting to teacher...');
-      connectToPeer(hostId);
-    });
+
     peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
+
     peer.on('call', (incomingCall) => {
+      addSystemMessage('Receiving call...');
       incomingCall.answer(localStream);
       call = incomingCall;
       setupCallStream(incomingCall, 'Teacher');
     });
+
     peer.on('error', (err) => {
-      console.error('Peer error:', err);
+      addSystemMessage('⚠️ ' + err.type + ': ' + err.message);
       if (err.type === 'peer-unavailable') {
-        updateStatus('disconnected', '● Teacher not found — waiting...');
-        // Retry every 3 seconds
-        setTimeout(() => { if (peer && !peer.destroyed) connectToPeer(hostId); }, 3000);
+        // Teacher not ready yet, will retry via attemptConnect
       }
     });
+
+    peer.on('disconnected', () => {
+      addSystemMessage('⚠️ Lost connection to server, reconnecting...');
+      peer.reconnect();
+    });
+
   } else {
-    // Teacher: register as host
-    peer = new Peer(hostId, {
-      debug: 0,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
-        ]
-      }
-    });
-    peer.on('open', () => {
+    // ─── Teacher: register as host ────────────────────────────────────────
+    peer = new Peer(hostId, { debug: 1, config: iceConfig });
+
+    peer.on('open', (id) => {
       updateStatus('connected', '● Waiting for student...');
-      addSystemMessage('Room created. Share the link with your student!');
+      addSystemMessage('Room ready! Your ID: ' + id);
+      addSystemMessage('Share the link with your student.');
     });
-    peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
+
+    peer.on('connection', (dataConn) => {
+      addSystemMessage('Student data channel connected!');
+      conn = dataConn;
+      setupDataConnection(conn);
+    });
+
     peer.on('call', (incomingCall) => {
+      addSystemMessage('Student calling — answering...');
       incomingCall.answer(localStream);
       call = incomingCall;
       setupCallStream(incomingCall, 'Student');
     });
+
     peer.on('error', (err) => {
-      console.error('Peer error:', err);
+      addSystemMessage('⚠️ ' + err.type + ': ' + err.message);
       if (err.type === 'unavailable-id') {
-        // Host ID taken - someone else created this room, join as student instead
+        // Room already exists — join as student instead
+        addSystemMessage('Room exists. Joining as participant...');
         peer.destroy();
-        const myId = 'ml-' + roomId + '-' + Math.random().toString(36).substring(2, 6);
-        peer = new Peer(myId, {
-          debug: 0,
-          config: {
-            iceServers: [
-              { urls: 'stun:stun.l.google.com:19302' },
-              { urls: 'stun:stun1.l.google.com:19302' },
-              { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-              { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-              { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
-            ]
-          }
-        });
-        peer.on('open', () => {
-          updateStatus('connected', '● Connecting...');
-          connectToPeer(hostId);
-        });
-        peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
-        peer.on('call', (incomingCall) => {
-          incomingCall.answer(localStream);
-          call = incomingCall;
-          setupCallStream(incomingCall, 'Teacher');
-        });
+        setTimeout(() => {
+          const myId = 'ml-' + roomId + '-' + Date.now().toString(36);
+          peer = new Peer(myId, { debug: 1, config: iceConfig });
+          peer.on('open', () => attemptConnect(hostId, 0));
+          peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
+          peer.on('call', (incomingCall) => {
+            incomingCall.answer(localStream);
+            call = incomingCall;
+            setupCallStream(incomingCall, 'Teacher');
+          });
+        }, 1000);
       }
+    });
+
+    peer.on('disconnected', () => {
+      addSystemMessage('⚠️ Lost connection to server, reconnecting...');
+      peer.reconnect();
     });
   }
 }
 
+// Retry connecting to host with exponential backoff
+function attemptConnect(hostId, attempt) {
+  if (!peer || peer.destroyed) return;
+  if (attempt > 10) {
+    addSystemMessage('❌ Could not find teacher after 10 attempts. Ask them to refresh their page.');
+    updateStatus('disconnected', '● Teacher not found');
+    return;
+  }
+
+  addSystemMessage(`Connection attempt ${attempt + 1}...`);
+
+  // Try data connection
+  conn = peer.connect(hostId, { reliable: true, serialization: 'json' });
+
+  conn.on('open', () => {
+    addSystemMessage('✓ Data channel open!');
+    setupDataConnection(conn);
+
+    // Now make the media call
+    addSystemMessage('Starting video call...');
+    call = peer.call(hostId, localStream);
+    if (call) {
+      setupCallStream(call, 'Teacher');
+    } else {
+      addSystemMessage('⚠️ Call object is null — localStream may be missing tracks');
+    }
+  });
+
+  conn.on('error', (err) => {
+    addSystemMessage('Connection attempt failed: ' + err);
+    const delay = Math.min(2000 * Math.pow(1.5, attempt), 10000);
+    setTimeout(() => attemptConnect(hostId, attempt + 1), delay);
+  });
+
+  // PeerJS doesn't always fire conn.error for unavailable peers
+  // Set a timeout to retry if open doesn't fire
+  setTimeout(() => {
+    if (conn && !conn.open && attempt < 10) {
+      addSystemMessage('No response — retrying...');
+      const delay = Math.min(2000 * Math.pow(1.5, attempt), 10000);
+      setTimeout(() => attemptConnect(hostId, attempt + 1), delay);
+    }
+  }, 5000);
+}
+
 function setupCallStream(mediaCall, label) {
   mediaCall.on('stream', (remoteStream) => {
+    addSystemMessage('✓ Receiving ' + label + ' video/audio stream!');
     document.getElementById('remoteVideo').srcObject = remoteStream;
     document.getElementById('remoteLabel').textContent = label;
     updateStatus('connected', '● In Session');
-    addSystemMessage(`${label} connected!`);
   });
   mediaCall.on('close', () => {
     document.getElementById('remoteVideo').srcObject = null;
     document.getElementById('remoteLabel').textContent = 'Disconnected';
     updateStatus('disconnected', '● Disconnected');
+    addSystemMessage(label + ' disconnected.');
   });
-}
-
-function connectToPeer(peerId) {
-  // Data channel
-  conn = peer.connect(peerId, { reliable: true });
-  setupDataConnection(conn);
-
-  // Media call - student initiates the call to teacher
-  call = peer.call(peerId, localStream);
-  if (call) {
-    setupCallStream(call, 'Teacher');
-  }
+  mediaCall.on('error', (err) => {
+    addSystemMessage('⚠️ Call error: ' + err);
+  });
 }
 
 function setupDataConnection(dataConn) {
