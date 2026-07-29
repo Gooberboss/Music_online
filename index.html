@@ -80,10 +80,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 /* Responsive */
 @media (max-width: 768px) {
   .app { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
+  .sidebar { 
+    position: fixed; top: 53px; right: 0; bottom: 60px; width: 300px; 
+    z-index: 100; transform: translateX(100%); transition: transform 0.3s ease;
+  }
+  .sidebar.open { transform: translateX(0); }
   .video-area { flex-direction: column; }
   .video-container { max-width: 100%; }
+  .chat-toggle { display: flex !important; }
 }
+.chat-toggle { 
+  display: none; position: fixed; bottom: 76px; right: 16px; z-index: 101;
+  background: #6c63ff; border: none; color: #fff; width: 48px; height: 48px; 
+  border-radius: 50%; font-size: 20px; cursor: pointer; align-items: center; 
+  justify-content: center; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.chat-toggle .badge {
+  position: absolute; top: -4px; right: -4px; background: #e94560; 
+  color: #fff; font-size: 11px; width: 20px; height: 20px; border-radius: 50%;
+  display: none; align-items: center; justify-content: center;
+}
+.chat-toggle .badge.visible { display: flex; }
 </style>
 </head>
 <body>
@@ -153,6 +170,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
       <button class="btn btn-end" onclick="endCall()" title="End Call">📞</button>
     </div>
   </div>
+  <button class="chat-toggle" id="chatToggle" onclick="toggleChatPanel()">💬<span class="badge" id="chatBadge">0</span></button>
 </div>
 
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
@@ -201,6 +219,23 @@ window.onload = async () => {
   } else {
     document.getElementById('preJoinSubtitle').textContent = 'Start a lesson and share the link with your student.';
   }
+
+  // Stop camera/mic when user minimizes or switches tabs (pre-join only)
+  document.addEventListener('visibilitychange', () => {
+    if (!roomId) { // Only when not in a session
+      if (document.hidden) {
+        // Pause all tracks
+        if (localStream) {
+          localStream.getTracks().forEach(t => t.enabled = false);
+        }
+      } else {
+        // Resume tracks when user comes back
+        if (localStream) {
+          localStream.getTracks().forEach(t => t.enabled = true);
+        }
+      }
+    }
+  });
 };
 
 async function handleDeviceChange() {
@@ -334,71 +369,125 @@ function joinRoom() {
   document.getElementById('localLabel').textContent = displayName + ' (You)';
   document.getElementById('localVideo').srcObject = localStream;
 
-  // Connect PeerJS
-  const peerId = roomId + '-' + Math.random().toString(36).substring(2, 6);
-  peer = new Peer(peerId);
+  // Connect PeerJS - use deterministic IDs based on room
+  // First person becomes host, second person connects to host
+  const hostId = 'ml-' + roomId + '-host';
+  const isJoining = document.getElementById('roomInput').readOnly; // student has pre-filled room
 
-  peer.on('open', () => {
-    updateStatus('connected', '● Connected');
-    // Try to connect to existing room host
-    const hostId = roomId + '-host';
-    if (peerId !== hostId) {
-      connectToPeer(hostId);
-    }
-  });
-
-  peer.on('connection', (dataConn) => {
-    conn = dataConn;
-    setupDataConnection(conn);
-  });
-
-  peer.on('call', (incomingCall) => {
-    incomingCall.answer(localStream);
-    call = incomingCall;
-    incomingCall.on('stream', (remoteStream) => {
-      document.getElementById('remoteVideo').srcObject = remoteStream;
-      document.getElementById('remoteLabel').textContent = 'Student';
-      updateStatus('connected', '● In Session');
+  if (isJoining) {
+    // Student: connect directly to the host
+    const myId = 'ml-' + roomId + '-' + Math.random().toString(36).substring(2, 6);
+    peer = new Peer(myId, {
+      debug: 0,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+        ]
+      }
     });
-  });
-
-  peer.on('error', (err) => {
-    if (err.type === 'peer-unavailable') {
-      // We are the first one - register as host
-      peer.destroy();
-      peer = new Peer(roomId + '-host');
-      peer.on('open', () => {
-        updateStatus('connected', '● Waiting for student...');
-      });
-      peer.on('connection', (dataConn) => {
-        conn = dataConn;
-        setupDataConnection(conn);
-      });
-      peer.on('call', (incomingCall) => {
-        incomingCall.answer(localStream);
-        call = incomingCall;
-        incomingCall.on('stream', (remoteStream) => {
-          document.getElementById('remoteVideo').srcObject = remoteStream;
-          document.getElementById('remoteLabel').textContent = 'Student';
-          updateStatus('connected', '● In Session');
+    peer.on('open', () => {
+      updateStatus('connected', '● Connecting to teacher...');
+      connectToPeer(hostId);
+    });
+    peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
+    peer.on('call', (incomingCall) => {
+      incomingCall.answer(localStream);
+      call = incomingCall;
+      setupCallStream(incomingCall, 'Teacher');
+    });
+    peer.on('error', (err) => {
+      console.error('Peer error:', err);
+      if (err.type === 'peer-unavailable') {
+        updateStatus('disconnected', '● Teacher not found — waiting...');
+        // Retry every 3 seconds
+        setTimeout(() => { if (peer && !peer.destroyed) connectToPeer(hostId); }, 3000);
+      }
+    });
+  } else {
+    // Teacher: register as host
+    peer = new Peer(hostId, {
+      debug: 0,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+        ]
+      }
+    });
+    peer.on('open', () => {
+      updateStatus('connected', '● Waiting for student...');
+      addSystemMessage('Room created. Share the link with your student!');
+    });
+    peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
+    peer.on('call', (incomingCall) => {
+      incomingCall.answer(localStream);
+      call = incomingCall;
+      setupCallStream(incomingCall, 'Student');
+    });
+    peer.on('error', (err) => {
+      console.error('Peer error:', err);
+      if (err.type === 'unavailable-id') {
+        // Host ID taken - someone else created this room, join as student instead
+        peer.destroy();
+        const myId = 'ml-' + roomId + '-' + Math.random().toString(36).substring(2, 6);
+        peer = new Peer(myId, {
+          debug: 0,
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+              { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+              { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+            ]
+          }
         });
-      });
-    }
+        peer.on('open', () => {
+          updateStatus('connected', '● Connecting...');
+          connectToPeer(hostId);
+        });
+        peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
+        peer.on('call', (incomingCall) => {
+          incomingCall.answer(localStream);
+          call = incomingCall;
+          setupCallStream(incomingCall, 'Teacher');
+        });
+      }
+    });
+  }
+}
+
+function setupCallStream(mediaCall, label) {
+  mediaCall.on('stream', (remoteStream) => {
+    document.getElementById('remoteVideo').srcObject = remoteStream;
+    document.getElementById('remoteLabel').textContent = label;
+    updateStatus('connected', '● In Session');
+    addSystemMessage(`${label} connected!`);
+  });
+  mediaCall.on('close', () => {
+    document.getElementById('remoteVideo').srcObject = null;
+    document.getElementById('remoteLabel').textContent = 'Disconnected';
+    updateStatus('disconnected', '● Disconnected');
   });
 }
 
 function connectToPeer(peerId) {
   // Data channel
-  conn = peer.connect(peerId);
+  conn = peer.connect(peerId, { reliable: true });
   setupDataConnection(conn);
 
-  // Media call
+  // Media call - student initiates the call to teacher
   call = peer.call(peerId, localStream);
-  call.on('stream', (remoteStream) => {
-    document.getElementById('remoteVideo').srcObject = remoteStream;
-    document.getElementById('remoteLabel').textContent = 'Teacher';
-    updateStatus('connected', '● In Session');
-  });
+  if (call) {
+    setupCallStream(call, 'Teacher');
+  }
 }
 
 function setupDataConnection(dataConn) {
@@ -649,6 +738,7 @@ function addChatMessage(name, message, isSelf) {
   div.innerHTML = `<div class="sender">${name}</div>${escapeHtml(message)}`;
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
+  if (!isSelf) incrementUnread();
 }
 
 function addSystemMessage(text) {
@@ -673,6 +763,31 @@ function updateStatus(type, text) {
   const el = document.getElementById('connectionStatus');
   el.className = `status-pill ${type}`;
   el.textContent = text;
+}
+
+// ─── Mobile Chat Toggle ──────────────────────────────────────────────────────
+let chatOpen = false;
+let unreadCount = 0;
+
+function toggleChatPanel() {
+  chatOpen = !chatOpen;
+  document.querySelector('.sidebar').classList.toggle('open', chatOpen);
+  if (chatOpen) {
+    unreadCount = 0;
+    const badge = document.getElementById('chatBadge');
+    badge.textContent = '0';
+    badge.classList.remove('visible');
+  }
+}
+
+function incrementUnread() {
+  // Only show badge if chat panel is hidden (mobile) and closed
+  if (window.innerWidth <= 768 && !chatOpen) {
+    unreadCount++;
+    const badge = document.getElementById('chatBadge');
+    badge.textContent = unreadCount > 9 ? '9+' : unreadCount;
+    badge.classList.add('visible');
+  }
 }
 </script>
 </body>
