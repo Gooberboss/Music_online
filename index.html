@@ -221,18 +221,25 @@ window.onload = async () => {
   }
 
   // Stop camera/mic when user minimizes or switches tabs (pre-join only)
-  document.addEventListener('visibilitychange', () => {
-    if (!roomId) { // Only when not in a session
-      if (document.hidden) {
-        // Pause all tracks
-        if (localStream) {
-          localStream.getTracks().forEach(t => t.enabled = false);
-        }
-      } else {
-        // Resume tracks when user comes back
-        if (localStream) {
-          localStream.getTracks().forEach(t => t.enabled = true);
-        }
+  document.addEventListener('visibilitychange', async () => {
+    if (roomId) return; // Don't touch tracks during a session
+
+    if (document.hidden) {
+      // Fully stop tracks — this turns off the camera/mic hardware on iOS Safari
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+      }
+      document.getElementById('previewVideo').srcObject = null;
+    } else {
+      // Re-acquire media when user comes back
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: STANDARD_AUDIO
+        });
+        document.getElementById('previewVideo').srcObject = localStream;
+      } catch (err) {
+        console.error('Failed to re-acquire media:', err);
       }
     }
   });
@@ -405,6 +412,17 @@ function joinRoom() {
       addSystemMessage('✓ Student connected (data channel)');
       conn = dataConn;
       setupDataConnection(conn);
+
+      // Teacher also calls the student (fixes Safari where student's call doesn't arrive)
+      setTimeout(() => {
+        if (!call && conn && conn.peer) {
+          addSystemMessage('Calling student back...');
+          call = peer.call(conn.peer, localStream);
+          if (call) {
+            setupCallStream(call, 'Student');
+          }
+        }
+      }, 1000);
     });
 
     peer.on('call', (incomingCall) => {
@@ -463,9 +481,10 @@ function joinRoom() {
 function startConnectionAttempts(hostId) {
   let attempt = 0;
   const maxAttempts = 15;
+  let connected = false;
 
   function tryConnect() {
-    if (!peer || peer.destroyed) return;
+    if (!peer || peer.destroyed || connected) return;
     attempt++;
 
     if (attempt > maxAttempts) {
@@ -478,8 +497,6 @@ function startConnectionAttempts(hostId) {
 
     // Try data connection first
     const dataConn = peer.connect(hostId, { reliable: true, serialization: 'json' });
-
-    let connected = false;
 
     dataConn.on('open', () => {
       if (connected) return;
@@ -495,15 +512,18 @@ function startConnectionAttempts(hostId) {
         addSystemMessage('Starting video/audio call...');
         call = peer.call(hostId, localStream);
         if (call) {
+          addSystemMessage('Call initiated, waiting for stream...');
           setupCallStream(call, 'Teacher');
         } else {
           addSystemMessage('⚠️ peer.call returned null. localStream tracks: ' + localStream.getTracks().length);
         }
-      }, 500); // Small delay to let data channel stabilize
+      }, 1000);
     });
 
     dataConn.on('error', (err) => {
-      addSystemMessage('  Connection error: ' + err);
+      if (!connected) {
+        addSystemMessage('  Connection error: ' + err);
+      }
     });
 
     // Retry timeout
