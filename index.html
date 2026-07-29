@@ -577,22 +577,25 @@ function joinRoom() {
     peer.on('connection', (dataConn) => {
       if (sessionEstablished) return;
       sessionEstablished = true;
-      conn = dataConn;
-      addSystemMessage('✓ Student data channel connected (open=' + dataConn.open + ', serial=' + dataConn.serialization + ')');
-      dataConn.on('data', onData);
-      dataConn.on('open', function() {
-        addSystemMessage('✓ Data channel open event fired');
+      var studentPeerId = dataConn.peer;
+      addSystemMessage('✓ Student found: ' + studentPeerId);
+
+      // Don't use the received connection — it's unreliable on the receiver side.
+      // Instead, connect BACK to the student (teacher-initiated connection works reliably)
+      addSystemMessage('Connecting back to student...');
+      var teacherConn = peer.connect(studentPeerId, { reliable: true, serialization: 'json' });
+
+      teacherConn.on('open', function() {
+        conn = teacherConn;
+        addSystemMessage('✓ Teacher→Student data channel open!');
+        conn.on('data', onData);
         conn.send({ type: 'join', name: displayName });
         setTimeout(createOfferAndSend, 500);
       });
-      // Also try immediately in case open already fired
-      setTimeout(function() {
-        if (!pc) {
-          addSystemMessage('Fallback: trying to send offer now...');
-          conn.send({ type: 'join', name: displayName });
-          setTimeout(createOfferAndSend, 300);
-        }
-      }, 2000);
+
+      teacherConn.on('error', function(err) {
+        addSystemMessage('❌ Teacher→Student connection error: ' + err);
+      });
     });
 
     peer.on('error', (err) => addSystemMessage('❌ ' + err.type));
@@ -607,6 +610,19 @@ function joinRoom() {
       addSystemMessage('✓ Connected to server');
       updateStatus('connected', '● Looking for teacher...');
       tryConnectToHost();
+    });
+
+    // Teacher will connect back to us — accept that for WebRTC signaling
+    peer.on('connection', (incomingConn) => {
+      addSystemMessage('✓ Teacher connected back');
+      incomingConn.on('data', onData);
+      incomingConn.on('open', () => {
+        conn = incomingConn;
+        addSystemMessage('✓ Teacher→Student channel open');
+      });
+      if (incomingConn.open) {
+        conn = incomingConn;
+      }
     });
 
     peer.on('error', (err) => {
