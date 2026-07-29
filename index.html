@@ -479,6 +479,58 @@ function joinRoom() {
     }
   };
 
+  // We'll use our own RTCPeerConnection instead of PeerJS's broken call mechanism
+  let pc = null;
+
+  function createPeerConnection(label) {
+    pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' }
+      ]
+    });
+
+    // Add local tracks
+    localStream.getTracks().forEach(track => {
+      pc.addTrack(track, localStream);
+    });
+
+    // When remote track arrives
+    pc.ontrack = (event) => {
+      addSystemMessage('✓ Receiving ' + label + ' stream!');
+      const remoteVideo = document.getElementById('remoteVideo');
+      remoteVideo.srcObject = event.streams[0];
+      document.getElementById('remoteLabel').textContent = label;
+      updateStatus('connected', '● In Session');
+
+      remoteVideo.play().then(() => {
+        addSystemMessage('✓ Video playing!');
+        removePlayOverlay();
+      }).catch(() => {
+        addSystemMessage('⚠️ Autoplay blocked — tap to play');
+        showPlayOverlay(remoteVideo, label);
+      });
+    };
+
+    // Send ICE candidates via data channel
+    pc.onicecandidate = (event) => {
+      if (event.candidate && conn && conn.open) {
+        conn.send({ type: 'ice-candidate', candidate: event.candidate.toJSON() });
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      addSystemMessage('WebRTC state: ' + pc.connectionState);
+      if (pc.connectionState === 'failed') {
+        addSystemMessage('❌ WebRTC connection failed. You may need a TURN server.');
+      }
+    };
+
+    return pc;
+  }
+
   if (isTeacher) {
     // ─── Teacher ──────────────────────────────────────────────────────────
     peer = new Peer(hostId, peerConfig);
@@ -486,60 +538,41 @@ function joinRoom() {
     peer.on('open', (id) => {
       addSystemMessage('✓ Registered as host: ' + id);
       updateStatus('connected', '● Waiting for student...');
-      // Register room in Firebase so students can see it
       registerRoom(roomId, displayName);
     });
 
     peer.on('connection', (dataConn) => {
-      // Only accept first connection, ignore all others
       if (sessionEstablished) return;
       sessionEstablished = true;
       addSystemMessage('✓ Student connected (data channel)');
       conn = dataConn;
-      setupDataConnection(conn);
 
-      function startCall() {
-        // Tell student we're ready
-        try { dataConn.send({ type: 'session-ready' }); } catch(e) {}
-        
-        // Call the student
-        setTimeout(() => {
-          if (!call) {
-            addSystemMessage('Calling student...');
-            call = peer.call(dataConn.peer, localStream);
-            if (call) {
-              setupCallStream(call, 'Student');
-            }
-          }
-        }, 1500);
+      function onDataReady() {
+        setupDataConnectionWithWebRTC(conn, 'Student');
+
+        // Teacher creates offer
+        setTimeout(async () => {
+          addSystemMessage('Creating WebRTC offer...');
+          pc = createPeerConnection('Student');
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          conn.send({ type: 'webrtc-offer', sdp: offer });
+          addSystemMessage('Offer sent to student');
+        }, 1000);
       }
 
-      // Check if already open (PeerJS sometimes opens before the event fires)
       if (dataConn.open) {
-        startCall();
+        onDataReady();
       } else {
-        dataConn.on('open', startCall);
+        dataConn.on('open', onDataReady);
       }
-    });
-
-    peer.on('call', (incomingCall) => {
-      // If we already have a call, ignore
-      if (call) return;
-      addSystemMessage('✓ Incoming call — answering...');
-      incomingCall.answer(localStream);
-      call = incomingCall;
-      setupCallStream(call, 'Student');
     });
 
     peer.on('error', (err) => {
       addSystemMessage('❌ Error: ' + err.type + ' — ' + err.message);
-      if (err.type === 'unavailable-id') {
-        addSystemMessage('Host ID taken. Try a different room or wait 60s for old session to expire.');
-      }
     });
 
     peer.on('disconnected', () => {
-      addSystemMessage('⚠️ Disconnected from server. Reconnecting...');
       if (!peer.destroyed) peer.reconnect();
     });
 
@@ -556,16 +589,7 @@ function joinRoom() {
 
     peer.on('connection', (dataConn) => {
       conn = dataConn;
-      setupDataConnection(conn);
-    });
-
-    peer.on('call', (incomingCall) => {
-      if (call) return; // Already in a call
-      addSystemMessage('✓ Receiving call — answering...');
-      incomingCall.answer(localStream);
-      call = incomingCall;
-      sessionEstablished = true;
-      setupCallStream(call, 'Teacher');
+      setupDataConnectionWithWebRTC(conn, 'Teacher');
     });
 
     peer.on('error', (err) => {
@@ -573,10 +597,45 @@ function joinRoom() {
     });
 
     peer.on('disconnected', () => {
-      addSystemMessage('⚠️ Disconnected from server. Reconnecting...');
       if (!peer.destroyed) peer.reconnect();
     });
   }
+}
+
+function setupDataConnectionWithWebRTC(dataConn, label) {
+  dataConn.on('open', () => {
+    dataConn.send({ type: 'join', name: displayName });
+  });
+  dataConn.on('data', async (data) => {
+    if (data.type === 'chat') {
+      addChatMessage(data.name, data.message, false);
+    } else if (data.type === 'join') {
+      document.getElementById('remoteLabel').textContent = data.name;
+      addSystemMessage(`${data.name} joined the lesson`);
+    } else if (data.type === 'music-mode') {
+      addSystemMessage(`${data.name} ${data.enabled ? 'enabled' : 'disabled'} Music Mode`);
+    } else if (data.type === 'recording') {
+      addSystemMessage(`${data.name} ${data.active ? 'started' : 'stopped'} recording`);
+    } else if (data.type === 'webrtc-offer') {
+      // Student receives offer from teacher
+      addSystemMessage('Received WebRTC offer from teacher');
+      pc = createPeerConnection(label);
+      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      dataConn.send({ type: 'webrtc-answer', sdp: answer });
+      addSystemMessage('Answer sent to teacher');
+    } else if (data.type === 'webrtc-answer') {
+      // Teacher receives answer from student
+      addSystemMessage('Received WebRTC answer from student');
+      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    } else if (data.type === 'ice-candidate') {
+      // Both sides receive ICE candidates
+      if (pc) {
+        await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+      }
+    }
+  });
 }
 
 function startConnectionAttempts(hostId) {
@@ -596,7 +655,6 @@ function startConnectionAttempts(hostId) {
 
     addSystemMessage(`Attempt ${attempt}/${maxAttempts}: connecting to teacher...`);
 
-    // Try data connection first
     const dataConn = peer.connect(hostId, { reliable: true, serialization: 'json' });
 
     dataConn.on('open', () => {
@@ -606,11 +664,9 @@ function startConnectionAttempts(hostId) {
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
 
       conn = dataConn;
-      addSystemMessage('✓ Data channel connected! Waiting for teacher to call...');
-      setupDataConnection(conn);
-      updateStatus('connected', '● Connected — waiting for video...');
-
-      // Don't call teacher — teacher will call us to avoid negotiation conflict
+      addSystemMessage('✓ Data channel connected! Waiting for WebRTC offer...');
+      setupDataConnectionWithWebRTC(conn, 'Teacher');
+      updateStatus('connected', '● Connected — setting up video...');
     });
 
     dataConn.on('error', (err) => {
@@ -619,7 +675,6 @@ function startConnectionAttempts(hostId) {
       }
     });
 
-    // Retry timeout
     retryTimer = setTimeout(() => {
       if (!connected) {
         try { dataConn.close(); } catch(e) {}
@@ -629,40 +684,6 @@ function startConnectionAttempts(hostId) {
   }
 
   tryConnect();
-}
-
-function setupCallStream(mediaCall, label) {
-  mediaCall.on('stream', (remoteStream) => {
-    addSystemMessage('✓ Receiving ' + label + ' stream! Tracks: ' + remoteStream.getTracks().map(t => t.kind).join(', '));
-    const remoteVideo = document.getElementById('remoteVideo');
-    remoteVideo.srcObject = remoteStream;
-    document.getElementById('remoteLabel').textContent = label;
-    updateStatus('connected', '● In Session');
-    
-    // Safari autoplay fix: try to play, if blocked show a tap-to-play overlay
-    remoteVideo.play().then(() => {
-      addSystemMessage('✓ Video playing!');
-      removePlayOverlay();
-    }).catch(() => {
-      addSystemMessage('⚠️ Autoplay blocked — showing tap prompt');
-      showPlayOverlay(remoteVideo, label);
-    });
-  });
-
-  mediaCall.on('close', () => {
-    document.getElementById('remoteVideo').srcObject = null;
-    document.getElementById('remoteLabel').textContent = 'Disconnected';
-    updateStatus('disconnected', '● Disconnected');
-    addSystemMessage(label + ' disconnected.');
-    call = null;
-    sessionEstablished = false;
-  });
-
-  mediaCall.on('error', (err) => {
-    addSystemMessage('⚠️ Call error: ' + err);
-    call = null;
-    sessionEstablished = false;
-  });
 }
 
 function showPlayOverlay(videoElement, label) {
@@ -686,28 +707,6 @@ function removePlayOverlay() {
   const existing = document.getElementById('playOverlay');
   if (existing) existing.remove();
 }
-
-function setupDataConnection(dataConn) {
-  dataConn.on('open', () => {
-    dataConn.send({ type: 'join', name: displayName });
-  });
-  dataConn.on('data', (data) => {
-    if (data.type === 'chat') {
-      addChatMessage(data.name, data.message, false);
-    } else if (data.type === 'join') {
-      document.getElementById('remoteLabel').textContent = data.name;
-      addSystemMessage(`${data.name} joined the lesson`);
-    } else if (data.type === 'music-mode') {
-      addSystemMessage(`${data.name} ${data.enabled ? 'enabled' : 'disabled'} Music Mode`);
-    } else if (data.type === 'recording') {
-      addSystemMessage(`${data.name} ${data.active ? 'started' : 'stopped'} recording`);
-    } else if (data.type === 'session-ready') {
-      // Teacher confirmed connection — stop all retries
-      addSystemMessage('✓ Teacher confirmed connection');
-    }
-  });
-}
-
 // ─── Controls ────────────────────────────────────────────────────────────────
 function toggleMic() {
   isMicOn = !isMicOn;
