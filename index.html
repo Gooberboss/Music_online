@@ -344,12 +344,17 @@ async function enumerateDevices() {
 }
 
 // ─── Join Room ───────────────────────────────────────────────────────────────
+let isTeacher = false;
+let retryTimer = null;
+
 function joinRoom() {
   displayName = document.getElementById('displayName').value || 'Guest';
   roomId = document.getElementById('roomInput').value.trim();
 
+  // Determine role BEFORE modifying roomId
+  isTeacher = !document.getElementById('roomInput').readOnly;
+
   if (!roomId) {
-    // Create new room
     roomId = Math.random().toString(36).substring(2, 10);
   }
 
@@ -369,162 +374,168 @@ function joinRoom() {
   document.getElementById('localLabel').textContent = displayName + ' (You)';
   document.getElementById('localVideo').srcObject = localStream;
 
-  // ICE servers config — use Google STUN (reliable and free)
-  const iceConfig = {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' }
-    ]
-  };
-
-  const hostId = 'ml-' + roomId + '-host';
-  const isJoining = document.getElementById('roomInput').readOnly;
-
+  addSystemMessage(`Role: ${isTeacher ? 'Teacher (host)' : 'Student (joining)'}`);
   addSystemMessage('Connecting to signaling server...');
 
-  if (isJoining) {
-    // ─── Student: connect to host ─────────────────────────────────────────
-    const myId = 'ml-' + roomId + '-' + Date.now().toString(36);
-    peer = new Peer(myId, { debug: 1, config: iceConfig });
+  const hostId = 'ml-' + roomId + '-host';
+
+  // PeerJS config with explicit server (use default PeerJS cloud)
+  const peerConfig = {
+    debug: 2,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' }
+      ]
+    }
+  };
+
+  if (isTeacher) {
+    // ─── Teacher ──────────────────────────────────────────────────────────
+    peer = new Peer(hostId, peerConfig);
 
     peer.on('open', (id) => {
-      addSystemMessage('Connected to server. Looking for teacher...');
-      updateStatus('connected', '● Looking for teacher...');
-      attemptConnect(hostId, 0);
-    });
-
-    peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
-
-    peer.on('call', (incomingCall) => {
-      addSystemMessage('Receiving call...');
-      incomingCall.answer(localStream);
-      call = incomingCall;
-      setupCallStream(incomingCall, 'Teacher');
-    });
-
-    peer.on('error', (err) => {
-      addSystemMessage('⚠️ ' + err.type + ': ' + err.message);
-      if (err.type === 'peer-unavailable') {
-        // Teacher not ready yet, will retry via attemptConnect
-      }
-    });
-
-    peer.on('disconnected', () => {
-      addSystemMessage('⚠️ Lost connection to server, reconnecting...');
-      peer.reconnect();
-    });
-
-  } else {
-    // ─── Teacher: register as host ────────────────────────────────────────
-    peer = new Peer(hostId, { debug: 1, config: iceConfig });
-
-    peer.on('open', (id) => {
+      addSystemMessage('✓ Registered as host: ' + id);
       updateStatus('connected', '● Waiting for student...');
-      addSystemMessage('Room ready! Your ID: ' + id);
-      addSystemMessage('Share the link with your student.');
     });
 
     peer.on('connection', (dataConn) => {
-      addSystemMessage('Student data channel connected!');
+      addSystemMessage('✓ Student connected (data channel)');
       conn = dataConn;
       setupDataConnection(conn);
     });
 
     peer.on('call', (incomingCall) => {
-      addSystemMessage('Student calling — answering...');
+      addSystemMessage('✓ Incoming call — answering with local stream...');
       incomingCall.answer(localStream);
       call = incomingCall;
-      setupCallStream(incomingCall, 'Student');
+      setupCallStream(call, 'Student');
     });
 
     peer.on('error', (err) => {
-      addSystemMessage('⚠️ ' + err.type + ': ' + err.message);
+      addSystemMessage('❌ Error: ' + err.type + ' — ' + err.message);
       if (err.type === 'unavailable-id') {
-        // Room already exists — join as student instead
-        addSystemMessage('Room exists. Joining as participant...');
-        peer.destroy();
-        setTimeout(() => {
-          const myId = 'ml-' + roomId + '-' + Date.now().toString(36);
-          peer = new Peer(myId, { debug: 1, config: iceConfig });
-          peer.on('open', () => attemptConnect(hostId, 0));
-          peer.on('connection', (dataConn) => { conn = dataConn; setupDataConnection(conn); });
-          peer.on('call', (incomingCall) => {
-            incomingCall.answer(localStream);
-            call = incomingCall;
-            setupCallStream(incomingCall, 'Teacher');
-          });
-        }, 1000);
+        addSystemMessage('Host ID taken. Try a different room or wait 60s for old session to expire.');
       }
     });
 
     peer.on('disconnected', () => {
-      addSystemMessage('⚠️ Lost connection to server, reconnecting...');
-      peer.reconnect();
+      addSystemMessage('⚠️ Disconnected from server. Reconnecting...');
+      if (!peer.destroyed) peer.reconnect();
+    });
+
+  } else {
+    // ─── Student ──────────────────────────────────────────────────────────
+    const myId = 'ml-' + roomId + '-' + Date.now().toString(36);
+    peer = new Peer(myId, peerConfig);
+
+    peer.on('open', (id) => {
+      addSystemMessage('✓ Connected as: ' + id);
+      updateStatus('connected', '● Looking for teacher...');
+      startConnectionAttempts(hostId);
+    });
+
+    peer.on('connection', (dataConn) => {
+      conn = dataConn;
+      setupDataConnection(conn);
+    });
+
+    peer.on('call', (incomingCall) => {
+      addSystemMessage('✓ Receiving call — answering...');
+      incomingCall.answer(localStream);
+      call = incomingCall;
+      setupCallStream(call, 'Teacher');
+    });
+
+    peer.on('error', (err) => {
+      addSystemMessage('❌ Error: ' + err.type + ' — ' + err.message);
+    });
+
+    peer.on('disconnected', () => {
+      addSystemMessage('⚠️ Disconnected from server. Reconnecting...');
+      if (!peer.destroyed) peer.reconnect();
     });
   }
 }
 
-// Retry connecting to host with exponential backoff
-function attemptConnect(hostId, attempt) {
-  if (!peer || peer.destroyed) return;
-  if (attempt > 10) {
-    addSystemMessage('❌ Could not find teacher after 10 attempts. Ask them to refresh their page.');
-    updateStatus('disconnected', '● Teacher not found');
-    return;
+function startConnectionAttempts(hostId) {
+  let attempt = 0;
+  const maxAttempts = 15;
+
+  function tryConnect() {
+    if (!peer || peer.destroyed) return;
+    attempt++;
+
+    if (attempt > maxAttempts) {
+      addSystemMessage('❌ Could not reach teacher. Make sure they are in the room and try refreshing.');
+      updateStatus('disconnected', '● Could not connect');
+      return;
+    }
+
+    addSystemMessage(`Attempt ${attempt}/${maxAttempts}: connecting to teacher...`);
+
+    // Try data connection first
+    const dataConn = peer.connect(hostId, { reliable: true, serialization: 'json' });
+
+    let connected = false;
+
+    dataConn.on('open', () => {
+      if (connected) return;
+      connected = true;
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+
+      conn = dataConn;
+      addSystemMessage('✓ Data channel connected!');
+      setupDataConnection(conn);
+
+      // Now start the media call
+      setTimeout(() => {
+        addSystemMessage('Starting video/audio call...');
+        call = peer.call(hostId, localStream);
+        if (call) {
+          setupCallStream(call, 'Teacher');
+        } else {
+          addSystemMessage('⚠️ peer.call returned null. localStream tracks: ' + localStream.getTracks().length);
+        }
+      }, 500); // Small delay to let data channel stabilize
+    });
+
+    dataConn.on('error', (err) => {
+      addSystemMessage('  Connection error: ' + err);
+    });
+
+    // Retry timeout
+    retryTimer = setTimeout(() => {
+      if (!connected) {
+        try { dataConn.close(); } catch(e) {}
+        tryConnect();
+      }
+    }, 4000);
   }
 
-  addSystemMessage(`Connection attempt ${attempt + 1}...`);
-
-  // Try data connection
-  conn = peer.connect(hostId, { reliable: true, serialization: 'json' });
-
-  conn.on('open', () => {
-    addSystemMessage('✓ Data channel open!');
-    setupDataConnection(conn);
-
-    // Now make the media call
-    addSystemMessage('Starting video call...');
-    call = peer.call(hostId, localStream);
-    if (call) {
-      setupCallStream(call, 'Teacher');
-    } else {
-      addSystemMessage('⚠️ Call object is null — localStream may be missing tracks');
-    }
-  });
-
-  conn.on('error', (err) => {
-    addSystemMessage('Connection attempt failed: ' + err);
-    const delay = Math.min(2000 * Math.pow(1.5, attempt), 10000);
-    setTimeout(() => attemptConnect(hostId, attempt + 1), delay);
-  });
-
-  // PeerJS doesn't always fire conn.error for unavailable peers
-  // Set a timeout to retry if open doesn't fire
-  setTimeout(() => {
-    if (conn && !conn.open && attempt < 10) {
-      addSystemMessage('No response — retrying...');
-      const delay = Math.min(2000 * Math.pow(1.5, attempt), 10000);
-      setTimeout(() => attemptConnect(hostId, attempt + 1), delay);
-    }
-  }, 5000);
+  tryConnect();
 }
 
 function setupCallStream(mediaCall, label) {
   mediaCall.on('stream', (remoteStream) => {
-    addSystemMessage('✓ Receiving ' + label + ' video/audio stream!');
-    document.getElementById('remoteVideo').srcObject = remoteStream;
+    addSystemMessage('✓ Receiving ' + label + ' stream! Tracks: ' + remoteStream.getTracks().map(t => t.kind).join(', '));
+    const remoteVideo = document.getElementById('remoteVideo');
+    remoteVideo.srcObject = remoteStream;
+    // Safari needs this
+    remoteVideo.play().catch(e => addSystemMessage('⚠️ Video play error: ' + e.message));
     document.getElementById('remoteLabel').textContent = label;
     updateStatus('connected', '● In Session');
   });
+
   mediaCall.on('close', () => {
     document.getElementById('remoteVideo').srcObject = null;
     document.getElementById('remoteLabel').textContent = 'Disconnected';
     updateStatus('disconnected', '● Disconnected');
     addSystemMessage(label + ' disconnected.');
   });
+
   mediaCall.on('error', (err) => {
     addSystemMessage('⚠️ Call error: ' + err);
   });
