@@ -491,32 +491,27 @@ function joinRoom() {
 
     peer.on('connection', (dataConn) => {
       // Only accept first connection, ignore duplicates
-      if (conn && conn.open) {
-        addSystemMessage('(Ignoring duplicate data connection)');
-        return;
-      }
+      if (conn && conn.open) return;
       addSystemMessage('✓ Student connected (data channel)');
       conn = dataConn;
       setupDataConnection(conn);
 
-      // Teacher also calls the student (fixes Safari where student's call doesn't arrive)
+      // Teacher initiates the call TO the student (single direction only)
       setTimeout(() => {
-        if (!call && conn && conn.peer) {
-          addSystemMessage('Calling student back...');
-          call = peer.call(conn.peer, localStream);
+        if (!call) {
+          addSystemMessage('Calling student...');
+          call = peer.call(dataConn.peer, localStream);
           if (call) {
             setupCallStream(call, 'Student');
           }
         }
-      }, 1000);
+      }, 1500);
     });
 
     peer.on('call', (incomingCall) => {
-      if (call) {
-        addSystemMessage('(Ignoring duplicate call)');
-        return;
-      }
-      addSystemMessage('✓ Incoming call — answering with local stream...');
+      // If student also called us, just ignore — we're already calling them
+      if (call) return;
+      addSystemMessage('✓ Incoming call — answering...');
       incomingCall.answer(localStream);
       call = incomingCall;
       setupCallStream(call, 'Student');
@@ -594,20 +589,11 @@ function startConnectionAttempts(hostId) {
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
 
       conn = dataConn;
-      addSystemMessage('✓ Data channel connected!');
+      addSystemMessage('✓ Data channel connected! Waiting for teacher to call...');
       setupDataConnection(conn);
+      updateStatus('connected', '● Connected — waiting for video...');
 
-      // Now start the media call
-      setTimeout(() => {
-        addSystemMessage('Starting video/audio call...');
-        call = peer.call(hostId, localStream);
-        if (call) {
-          addSystemMessage('Call initiated, waiting for stream...');
-          setupCallStream(call, 'Teacher');
-        } else {
-          addSystemMessage('⚠️ peer.call returned null. localStream tracks: ' + localStream.getTracks().length);
-        }
-      }, 1000);
+      // Don't call teacher — teacher will call us to avoid negotiation conflict
     });
 
     dataConn.on('error', (err) => {
