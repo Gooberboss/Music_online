@@ -578,19 +578,21 @@ function joinRoom() {
       if (sessionEstablished) return;
       sessionEstablished = true;
       conn = dataConn;
-      addSystemMessage('✓ Student data channel connected');
+      addSystemMessage('✓ Student data channel connected (open=' + dataConn.open + ', serial=' + dataConn.serialization + ')');
       dataConn.on('data', onData);
-
-      // Send offer once data channel is ready
-      if (dataConn.open) {
+      dataConn.on('open', function() {
+        addSystemMessage('✓ Data channel open event fired');
         conn.send({ type: 'join', name: displayName });
         setTimeout(createOfferAndSend, 500);
-      } else {
-        dataConn.on('open', () => {
+      });
+      // Also try immediately in case open already fired
+      setTimeout(function() {
+        if (!pc) {
+          addSystemMessage('Fallback: trying to send offer now...');
           conn.send({ type: 'join', name: displayName });
-          setTimeout(createOfferAndSend, 500);
-        });
-      }
+          setTimeout(createOfferAndSend, 300);
+        }
+      }, 2000);
     });
 
     peer.on('error', (err) => addSystemMessage('❌ ' + err.type));
