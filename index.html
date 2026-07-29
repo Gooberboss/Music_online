@@ -461,82 +461,115 @@ function joinRoom() {
   document.getElementById('localVideo').srcObject = localStream;
 
   addSystemMessage(`Role: ${isTeacher ? 'Teacher (host)' : 'Student (joining)'}`);
-  addSystemMessage('Connecting to signaling server...');
+  addSystemMessage('Connecting...');
 
   const hostId = 'ml-' + roomId + '-host';
-  let sessionEstablished = false; // Prevents duplicate calls/connections
-
-  // PeerJS config with explicit server (use default PeerJS cloud)
-  const peerConfig = {
-    debug: 2,
-    config: {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' }
-      ]
-    }
-  };
-
-  // We'll use our own RTCPeerConnection instead of PeerJS's broken call mechanism
+  let sessionEstablished = false;
   let pc = null;
 
-  function createPeerConnection(label) {
-    pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' }
-      ]
-    });
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' }
+  ];
 
-    // Add local tracks
-    localStream.getTracks().forEach(track => {
-      pc.addTrack(track, localStream);
-    });
-
-    // When remote track arrives
-    pc.ontrack = (event) => {
-      addSystemMessage('✓ Receiving ' + label + ' stream!');
-      const remoteVideo = document.getElementById('remoteVideo');
-      remoteVideo.srcObject = event.streams[0];
-      document.getElementById('remoteLabel').textContent = label;
-      updateStatus('connected', '● In Session');
-
-      remoteVideo.play().then(() => {
-        addSystemMessage('✓ Video playing!');
-        removePlayOverlay();
-      }).catch(() => {
-        addSystemMessage('⚠️ Autoplay blocked — tap to play');
-        showPlayOverlay(remoteVideo, label);
-      });
-    };
-
-    // Send ICE candidates via data channel
-    pc.onicecandidate = (event) => {
-      if (event.candidate && conn && conn.open) {
-        conn.send({ type: 'ice-candidate', candidate: event.candidate.toJSON() });
+  // ─── Handle incoming data messages (chat + WebRTC signaling) ────────────
+  function onData(data) {
+    try {
+      if (data.type === 'chat') {
+        addChatMessage(data.name, data.message, false);
+      } else if (data.type === 'join') {
+        addSystemMessage(data.name + ' joined');
+      } else if (data.type === 'music-mode') {
+        addSystemMessage(data.name + (data.enabled ? ' enabled' : ' disabled') + ' Music Mode');
+      } else if (data.type === 'recording') {
+        addSystemMessage(data.name + (data.active ? ' started' : ' stopped') + ' recording');
+      } else if (data.type === 'webrtc-offer') {
+        handleOffer(data.sdp);
+      } else if (data.type === 'webrtc-answer') {
+        handleAnswer(data.sdp);
+      } else if (data.type === 'ice-candidate') {
+        handleIceCandidate(data.candidate);
       }
-    };
-
-    pc.onconnectionstatechange = () => {
-      addSystemMessage('WebRTC state: ' + pc.connectionState);
-      if (pc.connectionState === 'failed') {
-        addSystemMessage('❌ WebRTC connection failed. You may need a TURN server.');
-      }
-    };
-
-    return pc;
+    } catch (err) {
+      addSystemMessage('⚠️ Error handling message: ' + err.message);
+    }
   }
 
+  function handleOffer(sdp) {
+    addSystemMessage('Received offer, creating answer...');
+    pc = new RTCPeerConnection({ iceServers: iceServers });
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    pc.ontrack = onRemoteTrack;
+    pc.onicecandidate = onIce;
+    pc.onconnectionstatechange = onPcState;
+    pc.setRemoteDescription(new RTCSessionDescription(sdp))
+      .then(() => pc.createAnswer())
+      .then(answer => pc.setLocalDescription(answer))
+      .then(() => {
+        conn.send({ type: 'webrtc-answer', sdp: pc.localDescription });
+        addSystemMessage('Answer sent');
+      })
+      .catch(err => addSystemMessage('❌ Answer error: ' + err.message));
+  }
+
+  function handleAnswer(sdp) {
+    addSystemMessage('Received answer');
+    pc.setRemoteDescription(new RTCSessionDescription(sdp))
+      .catch(err => addSystemMessage('❌ setRemoteDescription error: ' + err.message));
+  }
+
+  function handleIceCandidate(candidate) {
+    if (pc && candidate) {
+      pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+    }
+  }
+
+  function onIce(event) {
+    if (event.candidate && conn && conn.open) {
+      conn.send({ type: 'ice-candidate', candidate: event.candidate.toJSON() });
+    }
+  }
+
+  function onRemoteTrack(event) {
+    addSystemMessage('✓ Remote stream received!');
+    const remoteVideo = document.getElementById('remoteVideo');
+    remoteVideo.srcObject = event.streams[0];
+    document.getElementById('remoteLabel').textContent = isTeacher ? 'Student' : 'Teacher';
+    updateStatus('connected', '● In Session');
+    remoteVideo.play().then(() => {
+      removePlayOverlay();
+    }).catch(() => {
+      showPlayOverlay(remoteVideo, isTeacher ? 'Student' : 'Teacher');
+    });
+  }
+
+  function onPcState() {
+    if (pc) addSystemMessage('WebRTC: ' + pc.connectionState);
+  }
+
+  function createOfferAndSend() {
+    addSystemMessage('Creating offer...');
+    pc = new RTCPeerConnection({ iceServers: iceServers });
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    pc.ontrack = onRemoteTrack;
+    pc.onicecandidate = onIce;
+    pc.onconnectionstatechange = onPcState;
+    pc.createOffer()
+      .then(offer => pc.setLocalDescription(offer))
+      .then(() => {
+        conn.send({ type: 'webrtc-offer', sdp: pc.localDescription });
+        addSystemMessage('Offer sent');
+      })
+      .catch(err => addSystemMessage('❌ Offer error: ' + err.message));
+  }
+
+  // ─── Teacher ────────────────────────────────────────────────────────────
   if (isTeacher) {
-    // ─── Teacher ──────────────────────────────────────────────────────────
-    peer = new Peer(hostId, peerConfig);
+    peer = new Peer(hostId, { debug: 1, config: { iceServers: iceServers } });
 
     peer.on('open', (id) => {
-      addSystemMessage('✓ Registered as host: ' + id);
+      addSystemMessage('✓ Registered: ' + id);
       updateStatus('connected', '● Waiting for student...');
       registerRoom(roomId, displayName);
     });
@@ -544,146 +577,76 @@ function joinRoom() {
     peer.on('connection', (dataConn) => {
       if (sessionEstablished) return;
       sessionEstablished = true;
-      addSystemMessage('✓ Student connected (data channel)');
       conn = dataConn;
+      addSystemMessage('✓ Student data channel connected');
+      dataConn.on('data', onData);
 
-      function onDataReady() {
-        setupDataConnectionWithWebRTC(conn, 'Student');
-
-        // Teacher creates offer
-        setTimeout(async () => {
-          addSystemMessage('Creating WebRTC offer...');
-          pc = createPeerConnection('Student');
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          conn.send({ type: 'webrtc-offer', sdp: offer });
-          addSystemMessage('Offer sent to student');
-        }, 1000);
-      }
-
+      // Send offer once data channel is ready
       if (dataConn.open) {
-        onDataReady();
+        conn.send({ type: 'join', name: displayName });
+        setTimeout(createOfferAndSend, 500);
       } else {
-        dataConn.on('open', onDataReady);
+        dataConn.on('open', () => {
+          conn.send({ type: 'join', name: displayName });
+          setTimeout(createOfferAndSend, 500);
+        });
       }
     });
 
-    peer.on('error', (err) => {
-      addSystemMessage('❌ Error: ' + err.type + ' — ' + err.message);
-    });
+    peer.on('error', (err) => addSystemMessage('❌ ' + err.type));
+    peer.on('disconnected', () => { if (!peer.destroyed) peer.reconnect(); });
 
-    peer.on('disconnected', () => {
-      if (!peer.destroyed) peer.reconnect();
-    });
-
+  // ─── Student ────────────────────────────────────────────────────────────
   } else {
-    // ─── Student ──────────────────────────────────────────────────────────
     const myId = 'ml-' + roomId + '-' + Date.now().toString(36);
-    peer = new Peer(myId, peerConfig);
+    peer = new Peer(myId, { debug: 1, config: { iceServers: iceServers } });
 
-    peer.on('open', (id) => {
-      addSystemMessage('✓ Connected as: ' + id);
+    peer.on('open', () => {
+      addSystemMessage('✓ Connected to server');
       updateStatus('connected', '● Looking for teacher...');
-      startConnectionAttempts(hostId);
-    });
-
-    peer.on('connection', (dataConn) => {
-      conn = dataConn;
-      setupDataConnectionWithWebRTC(conn, 'Teacher');
+      tryConnectToHost();
     });
 
     peer.on('error', (err) => {
-      addSystemMessage('❌ Error: ' + err.type + ' — ' + err.message);
-    });
-
-    peer.on('disconnected', () => {
-      if (!peer.destroyed) peer.reconnect();
-    });
-  }
-}
-
-function setupDataConnectionWithWebRTC(dataConn, label) {
-  dataConn.on('open', () => {
-    dataConn.send({ type: 'join', name: displayName });
-  });
-  dataConn.on('data', async (data) => {
-    if (data.type === 'chat') {
-      addChatMessage(data.name, data.message, false);
-    } else if (data.type === 'join') {
-      document.getElementById('remoteLabel').textContent = data.name;
-      addSystemMessage(`${data.name} joined the lesson`);
-    } else if (data.type === 'music-mode') {
-      addSystemMessage(`${data.name} ${data.enabled ? 'enabled' : 'disabled'} Music Mode`);
-    } else if (data.type === 'recording') {
-      addSystemMessage(`${data.name} ${data.active ? 'started' : 'stopped'} recording`);
-    } else if (data.type === 'webrtc-offer') {
-      // Student receives offer from teacher
-      addSystemMessage('Received WebRTC offer from teacher');
-      pc = createPeerConnection(label);
-      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      dataConn.send({ type: 'webrtc-answer', sdp: answer });
-      addSystemMessage('Answer sent to teacher');
-    } else if (data.type === 'webrtc-answer') {
-      // Teacher receives answer from student
-      addSystemMessage('Received WebRTC answer from student');
-      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-    } else if (data.type === 'ice-candidate') {
-      // Both sides receive ICE candidates
-      if (pc) {
-        await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+      addSystemMessage('❌ ' + err.type + ': ' + err.message);
+      if (err.type === 'peer-unavailable' && !sessionEstablished) {
+        setTimeout(tryConnectToHost, 3000);
       }
+    });
+
+    peer.on('disconnected', () => { if (!peer.destroyed) peer.reconnect(); });
+
+    function tryConnectToHost() {
+      if (sessionEstablished || !peer || peer.destroyed) return;
+      addSystemMessage('Connecting to teacher...');
+
+      const dataConn = peer.connect(hostId, { reliable: true, serialization: 'json' });
+
+      dataConn.on('open', () => {
+        if (sessionEstablished) return;
+        sessionEstablished = true;
+        conn = dataConn;
+        addSystemMessage('✓ Connected! Waiting for offer...');
+        conn.send({ type: 'join', name: displayName });
+        conn.on('data', onData);
+        updateStatus('connected', '● Setting up video...');
+      });
+
+      dataConn.on('error', () => {
+        if (!sessionEstablished) {
+          setTimeout(tryConnectToHost, 3000);
+        }
+      });
+
+      // Timeout fallback
+      setTimeout(() => {
+        if (!sessionEstablished) {
+          addSystemMessage('Retrying...');
+          tryConnectToHost();
+        }
+      }, 5000);
     }
-  });
-}
-
-function startConnectionAttempts(hostId) {
-  let attempt = 0;
-  const maxAttempts = 15;
-  let connected = false;
-
-  function tryConnect() {
-    if (!peer || peer.destroyed || connected || sessionEstablished) return;
-    attempt++;
-
-    if (attempt > maxAttempts) {
-      addSystemMessage('❌ Could not reach teacher. Make sure they are in the room and try refreshing.');
-      updateStatus('disconnected', '● Could not connect');
-      return;
-    }
-
-    addSystemMessage(`Attempt ${attempt}/${maxAttempts}: connecting to teacher...`);
-
-    const dataConn = peer.connect(hostId, { reliable: true, serialization: 'json' });
-
-    dataConn.on('open', () => {
-      if (connected) return;
-      connected = true;
-      sessionEstablished = true;
-      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-
-      conn = dataConn;
-      addSystemMessage('✓ Data channel connected! Waiting for WebRTC offer...');
-      setupDataConnectionWithWebRTC(conn, 'Teacher');
-      updateStatus('connected', '● Connected — setting up video...');
-    });
-
-    dataConn.on('error', (err) => {
-      if (!connected) {
-        addSystemMessage('  Connection error: ' + err);
-      }
-    });
-
-    retryTimer = setTimeout(() => {
-      if (!connected) {
-        try { dataConn.close(); } catch(e) {}
-        tryConnect();
-      }
-    }, 4000);
   }
-
-  tryConnect();
 }
 
 function showPlayOverlay(videoElement, label) {
@@ -691,21 +654,14 @@ function showPlayOverlay(videoElement, label) {
   const overlay = document.createElement('div');
   overlay.id = 'playOverlay';
   overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:9999;';
-  overlay.innerHTML = `<div style="text-align:center;color:#fff;">
-    <div style="font-size:72px;">▶️</div>
-    <div style="font-size:20px;margin-top:16px;">Tap anywhere to start ${label}'s video</div>
-    <div style="font-size:14px;margin-top:8px;color:#aaa;">Safari requires a tap to play audio/video</div>
-  </div>`;
-  overlay.onclick = () => {
-    videoElement.play();
-    removePlayOverlay();
-  };
+  overlay.innerHTML = '<div style="text-align:center;color:#fff;"><div style="font-size:72px;">▶️</div><div style="font-size:20px;margin-top:16px;">Tap anywhere to start ' + label + ' video</div><div style="font-size:14px;margin-top:8px;color:#aaa;">Safari requires a tap to play audio/video</div></div>';
+  overlay.onclick = function() { videoElement.play(); removePlayOverlay(); };
   document.body.appendChild(overlay);
 }
 
 function removePlayOverlay() {
-  const existing = document.getElementById('playOverlay');
-  if (existing) existing.remove();
+  var el = document.getElementById('playOverlay');
+  if (el) el.remove();
 }
 // ─── Controls ────────────────────────────────────────────────────────────────
 function toggleMic() {
