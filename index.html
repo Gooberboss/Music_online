@@ -480,20 +480,24 @@ function joinRoom() {
   var heartbeatCheckInterval = null;
 
   function startHeartbeat() {
-    // Send ping every 2 seconds
+    // Send ping every 3 seconds
     heartbeatSendInterval = setInterval(function() {
       if (conn && conn.open) {
         try { conn.send({ type: 'heartbeat' }); } catch(e) {}
       }
-    }, 2000);
-
-    // Check if we've received a ping recently (timeout after 6 seconds)
-    heartbeatCheckInterval = setInterval(function() {
-      if (Date.now() - lastHeartbeat > 6000 && pc && pc.connectionState === 'connected') {
-        addSystemMessage('⚠️ Lost connection to remote peer');
-        handlePeerDisconnect();
-      }
     }, 3000);
+
+    // Check if we've received a ping recently (timeout after 15 seconds)
+    // Use longer timeout because mobile Safari pauses JS when backgrounded
+    heartbeatCheckInterval = setInterval(function() {
+      if (Date.now() - lastHeartbeat > 15000 && pc) {
+        // Only disconnect if WebRTC is also not connected
+        if (pc.connectionState !== 'connected') {
+          addSystemMessage('⚠️ Lost connection to remote peer');
+          handlePeerDisconnect();
+        }
+      }
+    }, 5000);
   }
 
   function handlePeerDisconnect() {
