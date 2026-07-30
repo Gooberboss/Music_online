@@ -216,6 +216,7 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let isScreenSharing = false;
 let originalVideoTrack = null;
+let pc = null; // RTCPeerConnection - global so toggleMusicMode can access it
 
 // ─── Audio Constraints ───────────────────────────────────────────────────────
 const STANDARD_AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 48000 };
@@ -466,7 +467,6 @@ function joinRoom() {
 
   const hostId = 'ml-' + roomId + '-host';
   let sessionEstablished = false;
-  let pc = null;
 
   const iceServers = [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -474,13 +474,53 @@ function joinRoom() {
     { urls: 'stun:stun2.l.google.com:19302' }
   ];
 
+  // ─── Heartbeat — detect disconnection quickly ───────────────────────────
+  var lastHeartbeat = Date.now();
+  var heartbeatSendInterval = null;
+  var heartbeatCheckInterval = null;
+
+  function startHeartbeat() {
+    // Send ping every 2 seconds
+    heartbeatSendInterval = setInterval(function() {
+      if (conn && conn.open) {
+        try { conn.send({ type: 'heartbeat' }); } catch(e) {}
+      }
+    }, 2000);
+
+    // Check if we've received a ping recently (timeout after 6 seconds)
+    heartbeatCheckInterval = setInterval(function() {
+      if (Date.now() - lastHeartbeat > 6000 && pc && pc.connectionState === 'connected') {
+        addSystemMessage('⚠️ Lost connection to remote peer');
+        handlePeerDisconnect();
+      }
+    }, 3000);
+  }
+
+  function handlePeerDisconnect() {
+    document.getElementById('remoteVideo').srcObject = null;
+    document.getElementById('remoteLabel').textContent = 'Waiting for student...';
+    updateStatus('connected', '● Student left — waiting for reconnect...');
+    addSystemMessage('Student has left. They can rejoin.');
+    if (pc) { try { pc.close(); } catch(e) {} }
+    pc = null;
+    conn = null;
+    sessionEstablished = false;
+    clearInterval(heartbeatSendInterval);
+    clearInterval(heartbeatCheckInterval);
+  }
+
   // ─── Handle incoming data messages (chat + WebRTC signaling) ────────────
   function onData(data) {
     try {
-      if (data.type === 'chat') {
+      if (data.type === 'heartbeat') {
+        lastHeartbeat = Date.now();
+        return;
+      } else if (data.type === 'chat') {
         addChatMessage(data.name, data.message, false);
       } else if (data.type === 'join') {
         addSystemMessage(data.name + ' joined');
+        lastHeartbeat = Date.now();
+        startHeartbeat();
       } else if (data.type === 'music-mode') {
         addSystemMessage(data.name + (data.enabled ? ' enabled' : ' disabled') + ' Music Mode');
       } else if (data.type === 'recording') {
@@ -491,6 +531,9 @@ function joinRoom() {
         handleAnswer(data.sdp);
       } else if (data.type === 'ice-candidate') {
         handleIceCandidate(data.candidate);
+      } else if (data.type === 'bye') {
+        addSystemMessage('Remote peer ended the call');
+        handlePeerDisconnect();
       }
     } catch (err) {
       addSystemMessage('⚠️ Error handling message: ' + err.message);
@@ -878,6 +921,12 @@ async function stopScreenShare() {
 function endCall() {
   if (confirm('End the lesson?')) {
     if (isRecording) stopRecording();
+    // Notify the other side immediately
+    if (conn && conn.open) {
+      try { conn.send({ type: 'bye' }); } catch(e) {}
+    }
+    if (pc) { try { pc.close(); } catch(e) {} }
+    pc = null;
     if (call) call.close();
     if (conn) conn.close();
     // Remove room from Firebase
