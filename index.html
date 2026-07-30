@@ -545,7 +545,20 @@ function joinRoom() {
   }
 
   function onPcState() {
-    if (pc) addSystemMessage('WebRTC: ' + pc.connectionState);
+    if (pc) {
+      addSystemMessage('WebRTC: ' + pc.connectionState);
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        // Remote peer left — clean up and allow reconnection
+        document.getElementById('remoteVideo').srcObject = null;
+        document.getElementById('remoteLabel').textContent = 'Waiting for student...';
+        updateStatus('connected', '● Student left — waiting for reconnect...');
+        addSystemMessage('Student has left. They can rejoin the same room.');
+        // Reset state to allow new connection
+        pc = null;
+        conn = null;
+        sessionEstablished = false;
+      }
+    }
   }
 
   function createOfferAndSend() {
